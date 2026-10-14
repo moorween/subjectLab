@@ -54,6 +54,31 @@ void loop() {
 
 Требования: ESP32, Arduino-ESP32 3.x (pioarduino), C++17, исключения включены (по умолчанию).
 
+## Для агентов (Claude Code, Codex, Cursor и др.)
+
+Агентам нужно читать документацию той версии, с которой собирается проект, а не
+пересказ по памяти. PlatformIO кладёт подключённую версию вместе с `docs/API.md` в
+`.pio/libdeps/<окружение>/subjectLab/`. Скопируйте в `AGENTS.md` проекта-потребителя
+(и `@AGENTS.md` в `CLAUDE.md`, если работаете с Claude Code):
+
+```markdown
+## Библиотека subjectLab
+
+Subject, BehaviorSubject, SubFilters, CoreLoop, Action, Remote и Async берутся из
+библиотеки subjectLab; версия (тег) указана в `lib_deps` в `platformio.ini`.
+
+- Перед работой с ними прочитай `.pio/libdeps/<окружение>/subjectLab/docs/API.md`
+  и заголовки `.pio/libdeps/<окружение>/subjectLab/src/*.h` — это описание именно
+  подключённой версии. Если папки нет, выполни `pio pkg install`.
+- Без локальной копии: https://raw.githubusercontent.com/moorween/subjectLab/<тег>/docs/API.md
+- Не используй API по памяти и не правь файлы в `.pio/libdeps` — изменения библиотеки
+  делаются в репозитории subjectLab.
+- При обновлении тега прочитай `CHANGELOG.md` библиотеки, разделы «Меняет поведение».
+```
+
+Правила для агентов, которые меняют саму библиотеку, — в [AGENTS.md](AGENTS.md).
+Документацию с кодом сверяет `python3 tools/check_docs.py` (и GitHub Actions на каждый push).
+
 ## Самотест на плате
 
 Корень репозитория — одновременно проект PlatformIO, который собирает
@@ -115,6 +140,10 @@ src/Subject.h         Subject, BehaviorSubject, SubFilters, Action, Remote
 src/CoreLoop.h        CoreLoop, Delivery
 src/Async.h, .cpp     таймеры
 docs/API.md           описание API
+CHANGELOG.md          изменения по версиям
+AGENTS.md, CLAUDE.md  правила для агентов
+tools/check_docs.py   сверка документации с кодом
+.github/workflows/    CI: сверка документации и сборка самотеста
 examples/selftest/    самотест (собирается из корня репозитория)
 platformio.ini        только для самотеста
 ```

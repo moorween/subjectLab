@@ -8,13 +8,25 @@
     "url": "https://github.com/moorween/subjectLab.git"
   },
   "authors": [
-    { "name": "moorween", "maintainer": true }
+    {
+      "name": "moorween",
+      "maintainer": true
+    }
   ],
   "frameworks": "arduino",
   "platforms": "espressif32",
-  "headers": ["Subject.h", "CoreLoop.h", "Async.h"],
+  "headers": [
+    "Subject.h",
+    "CoreLoop.h",
+    "Async.h"
+  ],
   "export": {
-    "exclude": [".pio", ".vscode", "examples/selftest/.pio"]
+    "exclude": [
+      ".pio",
+      ".vscode",
+      ".github",
+      "examples/selftest/.pio"
+    ]
   },
   "build": {
     "srcDir": "src",

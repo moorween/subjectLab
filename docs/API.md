@@ -132,6 +132,8 @@ void setup() {
 ### Subscription&lt;T&gt;
 
 `complete()` — отписаться (из любой задачи), `completed()` — проверить.
+`call(v)` — вызвать колбэк здесь и сейчас, `deliver(v)` — доставить значение с учётом
+цикла подписки (так рассылает `Subject`); обычно вызывать их самому не нужно.
 Возвращаемый `shared_ptr` хранить не обязательно.
 
 ### BehaviorSubject&lt;T&gt;
@@ -255,6 +257,21 @@ led.pause(); led.resume(); led.breakFn();   // управлять задачей
 | `Job::pause()` / `resume()` | Приостановить / продолжить. |
 | `Job::untilFn(fn)` / `whileFn(fn)` | Остановить, когда `fn(params)` вернёт `true` / как только вернёт `false`. |
 | `Job::run()` | Выполнить колбэк сейчас (у задачи из `delay()` — выполнить и отменить). |
+| `Job::setActive(bool)` | То же, что `pause`/`resume`, но меняет только эту копию `Job`, а не задачу в `Async`. |
+| `Job::attachUntilFn(fn)` / `attachWhileFn(fn)` | Условие только для этой копии `Job` (учитывается в её `run()`); для задачи в `Async` используйте `untilFn` / `whileFn`. |
+
+Поля `CallbackParams` (аргумент колбэка) и `Job`:
+
+| Поле | Описание |
+|---|---|
+| `CallbackParams::loopCount` | Номер запуска, с 1. |
+| `CallbackParams::iterationTime` | Сколько мс прошло с прошлого запуска. |
+| `CallbackParams::exeTime` | Для `repeat(ms, fn(CallbackParams))` — сколько мс прошло с создания задачи. |
+| `CallbackParams::breakFn()` | Отменить задачу. |
+| `Job::delay` | Период / задержка, мс. |
+| `Job::loopsCount` | Сколько раз задача запускалась (у копии — на момент копирования). |
+| `Job::mls` | `millis()` последнего запуска. |
+| `Job::executionTime` | Накопленное время, из него берётся `exeTime`. |
 
 Внутри колбэка можно отменять свои и чужие задачи, вызывать `clearAll()` и добавлять
 новые задачи (они выполнятся не раньше следующего `tick()`). `Job`, переживший свой
