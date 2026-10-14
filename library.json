@@ -1,0 +1,23 @@
+{
+  "name": "subjectLab",
+  "version": "1.0.0",
+  "description": "Реактивные потоки значений (Subject, pipe, фильтры) и межъядерные вызовы (CoreLoop, Action) для ESP32 на Arduino",
+  "keywords": "subject, observable, reactive, rx, freertos, dual-core, esp32",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/moorween/subjectLab.git"
+  },
+  "authors": [
+    { "name": "moorween", "maintainer": true }
+  ],
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "headers": ["Subject.h", "CoreLoop.h", "Async.h"],
+  "export": {
+    "exclude": [".pio", ".vscode", "examples/selftest/.pio"]
+  },
+  "build": {
+    "srcDir": "src",
+    "includeDir": "src"
+  }
+}
