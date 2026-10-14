@@ -516,6 +516,154 @@ void testFromPinAsync() {
   endTest();
 }
 
+
+// Прогнать tick() count раз с паузой stepMs
+static void tickFor(Async &a, int count, int stepMs = 2) {
+  for (int i = 0; i < count; i++) { a.tick(); delay(stepMs); }
+}
+
+void testAsyncBasic() {
+  beginTest("Async: delay, repeat, breakFn из колбэка, одинаковые задержки");
+  Async a;
+  int d1 = 0, d2 = 0, d3 = 0, r = 0, rp = 0;
+  long lastLoop = 0;
+  // Три задачи с одинаковой задержкой: в старой версии breakFn одной могла удалить другую
+  a.delay(5, [&]() { d1++; });
+  a.delay(5, [&]() { d2++; });
+  a.delay(5, [&]() { d3++; });
+  a.repeat(5, [&]() { r++; });
+  a.repeat(5, [&](CallbackParams p) {
+    rp++;
+    lastLoop = p.loopCount;
+    if (rp == 3) p.breakFn();     // отмена себя из колбэка
+  });
+  CHECK_EQ(a.size(), 5u);
+  tickFor(a, 40);                 // ~80 мс
+  CHECK_EQ(d1, 1);
+  CHECK_EQ(d2, 1);
+  CHECK_EQ(d3, 1);
+  CHECK(r >= 5);
+  CHECK_EQ(rp, 3);
+  CHECK_EQ(lastLoop, 3L);
+  CHECK_EQ(a.size(), 1u);         // остался только repeat(r)
+
+  int q = 0;
+  a.queue([&]() { q++; });
+  a.tick();
+  a.tick();
+  CHECK_EQ(q, 1);
+  endTest();
+}
+
+void testAsyncMutation() {
+  beginTest("Async: clearAll(), добавление и отмена задач из колбэков");
+  Async a;
+  int x = 0, y = 0;
+  a.delay(1, [&]() { x++; a.clearAll(); });
+  a.delay(1, [&]() { y++; });      // в том же tick() после clearAll() — не выполняется
+  delay(3);
+  a.tick();
+  CHECK_EQ(x, 1);
+  CHECK_EQ(y, 0);
+  CHECK_EQ(a.size(), 0u);
+  tickFor(a, 3);
+  CHECK_EQ(x, 1);
+
+  // Задача, добавленная из колбэка, выполняется не в том же tick()
+  int added = 0, sameTick = 0;
+  a.repeat(1, [&](CallbackParams p) {
+    if (p.loopCount == 1) {
+      a.queue([&]() { added++; });
+      sameTick = added;
+    }
+  });
+  a.tick();
+  CHECK_EQ(added, 0);
+  tickFor(a, 5);
+  CHECK_EQ(added, 1);
+  CHECK_EQ(sameTick, 0);
+  a.clearAll();
+
+  // Отмена чужой задачи из колбэка: и той, что уже выполнилась в этом tick(), и следующей
+  int z = 0, w = 0;
+  Job jz = a.repeat(1, [&]() { z++; });
+  a.delay(1, [&, jz]() mutable { jz.breakFn(); });   // jz уже выполнилась в этом tick()
+  Job jw;
+  a.delay(1, [&]() { jw.breakFn(); });               // jw ещё не выполнялась — и не выполнится
+  jw = a.repeat(1, [&]() { w++; });
+  delay(3);
+  a.tick();
+  tickFor(a, 5);
+  CHECK_EQ(z, 1);
+  CHECK_EQ(w, 0);
+  CHECK_EQ(a.size(), 0u);
+
+  // Удаление Async из колбэка
+  Async *dyn = new Async();
+  int afterDelete = 0;
+  dyn->delay(1, [&]() { Async *d = dyn; dyn = nullptr; delete d; });   // после delete — ни одного обращения к захваченному
+  dyn->delay(1, [&]() { afterDelete++; });
+  delay(3);
+  dyn->tick();
+  CHECK(dyn == nullptr);
+  CHECK_EQ(afterDelete, 0);
+  endTest();
+}
+
+void testAsyncJob() {
+  beginTest("Async: Job снаружи — run(), breakFn(), pause/resume, untilFn, whileFn");
+  Async a;
+  int n = 0;
+  Job j = a.delay(1000, [&]() { n++; });
+  j.run();                         // выполнить сейчас: колбэк и отмена задачи
+  CHECK_EQ(n, 1);
+  CHECK_EQ(a.size(), 0u);
+
+  int k = 0;
+  Job jk = a.repeat(1, [&]() { k++; });
+  jk.pause();
+  tickFor(a, 5);
+  CHECK_EQ(k, 0);
+  jk.resume();
+  tickFor(a, 5);
+  CHECK(k > 0);
+  jk.breakFn();
+  CHECK_EQ(a.size(), 0u);
+  int kStop = k;
+  tickFor(a, 3);
+  CHECK_EQ(k, kStop);
+
+  int u = 0;
+  Job ju = a.repeat(1, [&]() { u++; });
+  ju.untilFn([](CallbackParams p) { return p.loopCount > 3; });
+  tickFor(a, 15);
+  CHECK_EQ(u, 3);
+  CHECK_EQ(a.size(), 0u);
+
+  int wv = 0;
+  Job jw = a.repeat(1, [&]() { wv++; });
+  jw.whileFn([](CallbackParams p) { return p.loopCount <= 2; });
+  tickFor(a, 15);
+  CHECK_EQ(wv, 2);
+  CHECK_EQ(a.size(), 0u);
+
+  // Job пережил свой Async; Job по умолчанию
+  Job stale;
+  {
+    Async b;
+    stale = b.delay(10, []() {});
+  }
+  stale.breakFn();
+  stale.pause();
+  stale.resume();
+  stale.untilFn([](CallbackParams) { return true; });
+  Job empty;
+  empty.run();
+  empty.breakFn();
+  CHECK(true);   // дошли сюда — без сбоев
+  endTest();
+}
+
 // ---------------------------------------------------------------------------
 // Межъядерные тесты
 // ---------------------------------------------------------------------------
@@ -754,6 +902,71 @@ void testAction() {
   endTest();
 }
 
+
+void testRemote() {
+  beginTest("Remote: вызов на другом ядре с ответом (ниже 1 ожидаемое сообщение об ошибке)");
+  Remote<int(int, int)> add(core1Loop);
+  std::atomic<TaskHandle_t> ht{nullptr};
+  add.handle([&](int a, int b) { ht = currentTask(); return a + b; });
+
+  // Ответ в задаче core0Loop
+  std::atomic<int> r0{0};
+  std::atomic<TaskHandle_t> rt0{nullptr};
+  CHECK(add.call(2, 3, [&](int v) { rt0 = currentTask(); r0 = v; }, core0Loop));
+  CHECK_WAIT(r0.load() == 5, 1000);
+  CHECK(ht.load() == core1Task);
+  CHECK(rt0.load() == core0Task);
+
+  // Ответ в домашнем цикле
+  std::atomic<int> r1{0};
+  std::atomic<TaskHandle_t> rt1{nullptr};
+  CHECK(add.call(10, 20, [&](int v) { rt1 = currentTask(); r1 = v; }));
+  CHECK_WAIT(r1.load() == 30, 1000);
+  CHECK(rt1.load() == core1Task);
+
+  // Синхронно из задачи тестов
+  auto sum = add.callSync(pdMS_TO_TICKS(500), 7, 8);
+  CHECK(sum.has_value());
+  if (sum) CHECK_EQ(*sum, 15);
+
+  // Синхронно из домашнего цикла — выполняется сразу, без очереди
+  std::atomic<int> inHome{0};
+  core1Loop.post([&]() {
+    auto v = add.callSync(pdMS_TO_TICKS(100), 1, 1);
+    inHome = v ? *v : -1;
+  });
+  CHECK_WAIT(inHome.load() == 2, 1000);
+
+  // Результат String, вызов из ядра 0 на ядро 1 и ответ обратно
+  Remote<String(int)> name(core1Loop);
+  name.handle([](int i) { return String("ch") + String(i); });
+  std::atomic<bool> gotName{false};
+  String nameValue;
+  core0Loop.post([&]() {
+    name.call(5, [&](String v) { nameValue = v; gotName = true; }, core0Loop);
+  });
+  CHECK_WAIT(gotName.load(), 1000);
+  CHECK(nameValue == "ch5");
+
+  // Без обработчика и с исключением — пустой результат, ответа нет
+  Remote<int()> none(core1Loop);
+  CHECK(!none.callSync(pdMS_TO_TICKS(200)).has_value());
+  Remote<int()> bad(core1Loop);
+  bad.handle([]() -> int { throw std::runtime_error("ожидаемая ошибка обработчика Remote"); });
+  CHECK(!bad.callSync(pdMS_TO_TICKS(200)).has_value());
+
+  // Таймаут: домашний цикл занят. Опоздавший вызов выполнится позже — без сбоев
+  LoopBlocker blocker;
+  blocker.block(core1Loop);
+  uint32_t t0 = millis();
+  auto late = add.callSync(pdMS_TO_TICKS(50), 1, 2);
+  uint32_t spent = millis() - t0;
+  CHECK(!late.has_value());
+  CHECK(spent >= 40 && spent < 300);
+  blocker.release();
+  endTest();
+}
+
 void testStress() {
   beginTest("Нагрузка: два ядра одновременно (next, subscribe, complete, get)");
   auto st = Subject<int>::create(core0Loop);
@@ -872,6 +1085,9 @@ void runAll() {
   testExceptions();
   testTypes();
   testFromPinAsync();
+  testAsyncBasic();
+  testAsyncMutation();
+  testAsyncJob();
   testCoreLoop();
   testHomedQueue();
   testHomedGlobal();
@@ -880,6 +1096,7 @@ void runAll() {
   testObserveOn();
   testFromPinHomed();
   testAction();
+  testRemote();
   testStress();
   testMemory();
 

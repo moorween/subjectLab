@@ -10,6 +10,9 @@
 #include <atomic>
 #include <mutex>
 #include <tuple>
+#include <optional>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "Async.h"
 #include "CoreLoop.h"
 
@@ -376,6 +379,137 @@ class Action {
         return useWait ? s->home->post(job, wait) : s->home->post(job);
       }
       s->dispatch(params);
+      return true;
+    }
+
+    std::shared_ptr<State> _s;
+};
+
+// ---------------------------------------------------------------------------
+// Remote — вызов функции в другой задаче/ядре с ответом.
+//
+//   Remote<float(int)> readAdc(core1Loop);
+//   readAdc.handle([](int pin) { return analogRead(pin) * 3.3f / 4095; });   // выполняется на ядре 1
+//   readAdc.call(34, [](float v) { ... }, core0Loop);   // ответ — в задаче core0Loop
+//   auto v = readAdc.callSync(pdMS_TO_TICKS(100), 34);   // ждать ответ (std::optional)
+// ---------------------------------------------------------------------------
+template <typename Signature> class Remote;
+
+template <typename R, typename... Args>
+class Remote<R(Args...)> {
+  public:
+    using Params = std::tuple<Args...>;
+    using Handler = std::function<R(Args...)>;
+    using Reply = std::function<void(R)>;
+
+    Remote() : _s(std::make_shared<State>()) {}
+    explicit Remote(CoreLoop &home) : _s(std::make_shared<State>()) { _s->home = &home; }
+    Remote(const Remote &) = delete;
+    Remote &operator=(const Remote &) = delete;
+
+    // Вызовы, которые ещё стоят в очереди, после удаления Remote ничего не делают
+    ~Remote() {
+      std::lock_guard<std::mutex> lock(_s->mx);
+      _s->alive = false;
+      _s->handler = nullptr;
+    }
+
+    // Задать обработчик (один; новый заменяет старый). Выполняется в задаче домашнего цикла.
+    void handle(Handler handler) {
+      std::lock_guard<std::mutex> lock(_s->mx);
+      _s->handler = handler;
+    }
+
+    // Вызвать с любого ядра, ответ выполнится в задаче цикла replyLoop.
+    // false — очередь домашнего цикла полна. Если обработчика нет или он бросил
+    // исключение, ответа не будет.
+    bool call(Args... args, Reply reply, CoreLoop &replyLoop) {
+      return send(Params(args...), reply, &replyLoop);
+    }
+
+    // То же, ответ выполнится в домашнем цикле (сразу после обработчика)
+    bool call(Args... args, Reply reply) {
+      return send(Params(args...), reply, nullptr);
+    }
+
+    // Вызвать и ждать результат до timeout тиков. Пусто — очередь полна, нет обработчика,
+    // исключение в обработчике или не дождались. Из домашнего цикла выполняется сразу.
+    // Не вызывайте из цикла A функцию цикла B, которая сама синхронно ждёт цикл A, —
+    // оба будут ждать до таймаута.
+    std::optional<R> callSync(TickType_t timeout, Args... args) {
+      Params params(args...);
+      std::shared_ptr<State> s = _s;
+      if (!s->home || s->home->isCurrent()) return s->invoke(params);
+
+      std::shared_ptr<Wait> w = std::make_shared<Wait>();   // переживёт таймаут, если ответ опоздает
+      if (!w->sem) return std::nullopt;
+      TickType_t start = xTaskGetTickCount();
+      bool posted = s->home->post([s, params, w]() {
+        w->result = s->invoke(params);
+        xSemaphoreGive(w->sem);
+      }, timeout);
+      if (!posted) return std::nullopt;
+
+      TickType_t left = portMAX_DELAY;
+      if (timeout != portMAX_DELAY) {
+        TickType_t spent = xTaskGetTickCount() - start;
+        left = spent >= timeout ? 0 : timeout - spent;
+      }
+      if (xSemaphoreTake(w->sem, left) != pdTRUE) return std::nullopt;
+      return w->result;
+    }
+
+  private:
+    struct State {
+      CoreLoop *home = nullptr;
+      std::mutex mx;
+      Handler handler;
+      bool alive = true;
+
+      std::optional<R> invoke(const Params &params) {
+        Handler h;
+        {
+          std::lock_guard<std::mutex> lock(mx);
+          if (!alive || !handler) return std::nullopt;
+          h = handler;
+        }
+        try {
+          return std::apply(h, params);
+        } catch (const std::exception &e) {
+          Serial.printf("Remote handler error: %s\n", e.what());
+        } catch (...) {
+          Serial.println("Unknown remote handler error");
+        }
+        return std::nullopt;
+      }
+    };
+
+    struct Wait {
+      SemaphoreHandle_t sem = xSemaphoreCreateBinary();
+      std::optional<R> result;
+      ~Wait() { if (sem) vSemaphoreDelete(sem); }
+    };
+
+    bool send(Params params, Reply reply, CoreLoop *replyLoop) {
+      std::shared_ptr<State> s = _s;
+      auto job = [s, params, reply, replyLoop]() {
+        std::optional<R> result = s->invoke(params);
+        if (!result || !reply) return;
+        R value = *result;
+        if (replyLoop && !replyLoop->isCurrent()) {
+          replyLoop->post([reply, value]() { reply(value); });
+          return;
+        }
+        try {
+          reply(value);
+        } catch (const std::exception &e) {
+          Serial.printf("Remote reply error: %s\n", e.what());
+        } catch (...) {
+          Serial.println("Unknown remote reply error");
+        }
+      };
+      if (s->home && !s->home->isCurrent()) return s->home->post(job);
+      job();
       return true;
     }
 

@@ -1,18 +1,29 @@
 #include "Async.h"
 #include <Arduino.h>
+#include <iterator>
+
+// ---------------------------------------------------------------------------
+// Job
+// ---------------------------------------------------------------------------
 
 Job::Job() {
-  
+  this->breakFn = []() {};
+  this->whileFn = [](std::function<bool(CallbackParams)>) { return Job(); };
+  this->untilFn = [](std::function<bool(CallbackParams)>) { return Job(); };
+  this->pause = []() { return Job(); };
+  this->resume = []() { return Job(); };
 }
-Job::Job(long delay, unsigned long mls, unsigned long exeTime, callback cb): delay(delay), mls(mls), executionTime(exeTime), _cbFn(cb)
+
+Job::Job(long delay, unsigned long mls, unsigned long exeTime, callback cb) : Job()
 {
-  this->loopsCount = 0;
-  this->breakFn = [](){ return; };
+  this->delay = delay;
+  this->mls = mls;
+  this->executionTime = exeTime;
+  this->_cbFn = cb;
 }
 
 Job Job::attachUntilFn(std::function<bool(CallbackParams)> untilFn) {
   this->_untilFns.push_back(untilFn);
-  // this->_untilFns.insert(this->_untilFns.end(), untilFn);
   return *this;
 }
 
@@ -33,62 +44,81 @@ void Job::run() {
 void Job::run(unsigned long delayTime) {
   if (!this->_active) return;
 
-  bool untilPassed = true;
-  bool whilePassed = true;
-
   CallbackParams params;
   params.iterationTime = delayTime;
   params.exeTime = this->executionTime;
   params.loopCount = this->loopsCount;
 
-  for (std::function<bool(CallbackParams)> untilFn : this->_untilFns) {
-    untilPassed = untilPassed && !untilFn(params);
-  }
-
-  for (std::function<bool(CallbackParams)> whileFn : this->_whileFns) {
-    whilePassed = whilePassed && whileFn(params);
-  }
+  bool untilPassed = true;
+  bool whilePassed = true;
+  for (auto &untilFn : this->_untilFns) untilPassed = untilPassed && !untilFn(params);
+  for (auto &whileFn : this->_whileFns) whilePassed = whilePassed && whileFn(params);
 
   if (untilPassed && whilePassed) {
     params.breakFn = this->breakFn;
-    this->_cbFn(params);
-  } else {
+    if (this->_cbFn) this->_cbFn(params);
+  } else if (this->breakFn) {
     this->breakFn();
   }
 }
 
-Async::Async() {
-};
+// ---------------------------------------------------------------------------
+// Async
+// ---------------------------------------------------------------------------
+
+Async::Async() {}
 
 Job Async::put(long delay, unsigned long mls, unsigned long exeTime, callback cb) {
-  int key = delay + (millis() / 1000);
-  Job job = Job(delay, mls, exeTime, cb);
-  auto it = this->_jobs.insert({key, job});
+  uint32_t id = _nextId++;
+  std::weak_ptr<int> alive = _alive;
+  Async *self = this;
 
-  it->second.breakFn = [this, key]() {
-    auto it = this->_jobs.find(key);
-    if (it != this->_jobs.end()) {
-      this->_jobs.erase(it);
-    }
+  Job job(delay, mls, exeTime, cb);
+  job.breakFn = [self, alive, id]() {
+    if (!alive.expired()) self->remove(id);
+  };
+  job.untilFn = [self, alive, id](std::function<bool(CallbackParams)> fn) {
+    if (!alive.expired())
+      if (Entry *e = self->find(id)) return e->job.attachUntilFn(fn);
+    return Job();
+  };
+  job.whileFn = [self, alive, id](std::function<bool(CallbackParams)> fn) {
+    if (!alive.expired())
+      if (Entry *e = self->find(id)) return e->job.attachWhileFn(fn);
+    return Job();
+  };
+  job.pause = [self, alive, id]() {
+    if (!alive.expired())
+      if (Entry *e = self->find(id)) return e->job.setActive(false);
+    return Job();
+  };
+  job.resume = [self, alive, id]() {
+    if (!alive.expired())
+      if (Entry *e = self->find(id)) return e->job.setActive(true);
+    return Job();
   };
 
-  it->second.untilFn = [&it](std::function<bool(CallbackParams)> untilFn) {
-    return it->second.attachUntilFn(untilFn);
-  };
+  _jobs.push_back(Entry{id, job, false});
+  return job;
+}
 
-  it->second.whileFn = [&it](std::function<bool(CallbackParams)> whileFn) {
-    return it->second.attachWhileFn(whileFn);
-  };
+Async::Entry *Async::find(uint32_t id) {
+  for (auto &e : _jobs)
+    if (e.id == id && !e.removed) return &e;
+  return nullptr;
+}
 
-  it->second.pause = [&it]() {
-    return it->second.setActive(false);
-  };
+void Async::remove(uint32_t id) {
+  for (auto it = _jobs.begin(); it != _jobs.end(); ++it) {
+    if (it->id != id) continue;
+    if (_ticking) it->removed = true;   // идёт обход списка — удалим после tick()
+    else _jobs.erase(it);
+    return;
+  }
+}
 
-  // it->second.resumeFn = [&it]() {
-  //   return it->second.setActive(true);
-  // };
-
-  return it->second;
+void Async::purge() {
+  _jobs.remove_if([](const Entry &e) { return e.removed; });
 }
 
 Job Async::repeat(int delay, callback cb) {
@@ -96,33 +126,61 @@ Job Async::repeat(int delay, callback cb) {
 }
 
 Job Async::repeat(int delay, std::function<void()> cb) {
-  callback cb2 = [cb](CallbackParams cb3) {
-    cb();
-  };
+  callback cb2 = [cb](CallbackParams) { cb(); };
   return this->put(delay, millis(), millis(), cb2);
 }
 
 Job Async::delay(int delay, std::function<void()> cb) {
-  callback cb2 = [cb](CallbackParams cb3) {
+  callback cb2 = [cb](CallbackParams params) {
     cb();
-    cb3.breakFn();
+    params.breakFn();
   };
   return this->put(delay, millis(), millis(), cb2);
 }
 
-void Async::tick() {
-  for (std::multimap<int, Job>::iterator it = this->_jobs.begin(); it != this->_jobs.end();  it++) {
-      unsigned long delayTime = millis() - it->second.mls;
-      if ((it->second.mls == 0) || (delayTime >= it->second.delay)) {
-        it->second.mls = millis();
-        it->second.loopsCount ++;
-        it->second.executionTime += delayTime;
+void Async::queue(std::function<void()> cb) {
+  this->delay(0, cb);
+}
 
-        it->second.run(delayTime);
+void Async::tick() {
+  if (_jobs.empty()) return;
+
+  // Обходим только задачи, которые были до начала tick(): добавленные из колбэков
+  // выполнятся в следующий раз. Удаление во время обхода только помечает задачу.
+  std::weak_ptr<int> alive = _alive;
+  auto last = std::prev(_jobs.end());
+  _ticking++;
+  for (auto it = _jobs.begin();; ++it) {
+    bool isLast = (it == last);
+    if (!it->removed) {
+      Job &job = it->job;
+      unsigned long now = millis();
+      unsigned long delayTime = now - job.mls;
+      if (job.mls == 0 || delayTime >= (unsigned long)job.delay) {
+        job.mls = now;
+        job.loopsCount++;
+        job.executionTime += delayTime;
+        job.run(delayTime);
+        if (alive.expired()) return;   // Async удалили из колбэка
       }
+    }
+    if (isLast) break;
   }
+  _ticking--;
+  if (_ticking == 0) purge();
 }
 
 void Async::clearAll() {
-  this->_jobs.clear();
+  if (_ticking) {
+    for (auto &e : _jobs) e.removed = true;
+  } else {
+    _jobs.clear();
+  }
+}
+
+size_t Async::size() const {
+  size_t n = 0;
+  for (auto &e : _jobs)
+    if (!e.removed) n++;
+  return n;
 }

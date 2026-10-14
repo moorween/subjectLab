@@ -186,6 +186,82 @@ moveGate.callWait(pdMS_TO_TICKS(50), 80, true);  // ждать место в о�
 
 ---
 
+## Remote&lt;R(Args...)&gt; — вызов функции на другом ядре с ответом
+
+Функция с результатом, которая всегда выполняется в домашнем цикле. Вызвать можно
+с любого ядра: асинхронно (ответ придёт в колбэк) или с ожиданием результата.
+
+```cpp
+Remote<float(int)> readAdc(core1Loop);           // объявление (глобально)
+
+readAdc.handle([](int pin) {                     // обработчик — на ядре 1
+  return analogRead(pin) * 3.3f / 4095;
+});
+
+// Асинхронно: ответ выполнится в задаче core0Loop
+readAdc.call(34, [](float v) { mqttSetValue(mqttVoltage, v); }, core0Loop);
+
+// Асинхронно: ответ выполнится на ядре 1, сразу после обработчика
+readAdc.call(34, [](float v) { /* ... */ });
+
+// С ожиданием до 100 мс (std::optional: пусто — не дождались или ошибка)
+if (auto v = readAdc.callSync(pdMS_TO_TICKS(100), 34)) Serial.println(*v);
+```
+
+| Член | Описание |
+|---|---|
+| `Remote<R(Args...)>(CoreLoop& home)` | Обработчик выполняется в задаче `home`. Без цикла — синхронно. |
+| `handle(R(Args...))` | Задать обработчик (один; новый заменяет старый). |
+| `call(args..., reply, CoreLoop& replyLoop)` | Вызов; `reply(R)` выполнится в задаче `replyLoop`. `false` — очередь домашнего цикла полна. |
+| `call(args..., reply)` | То же, `reply` выполнится в домашнем цикле. |
+| `callSync(timeout, args...)` | Ждать результат до `timeout` тиков; возвращает `std::optional<R>`. Из домашнего цикла выполняется сразу, без очереди. |
+
+Если обработчика нет или он бросил исключение, ответа не будет (`callSync` вернёт
+пустое значение, исключение печатается в `Serial`). Если `callSync` не дождался,
+вызов всё равно выполнится позже, а результат будет отброшен.
+
+Осторожно с взаимным ожиданием: если обработчик в цикле B вызывает `callSync` к
+циклу A, а A в это время сам ждёт B через `callSync`, оба простоят до таймаута.
+Для `void`-функций без ответа используйте `Action`.
+
+## Async — таймеры
+
+`Async` выполняет задачи по времени; `tick()` нужно вызывать в цикле. У каждого
+`CoreLoop` есть свой `async` (его `tick()` вызывает `run()`).
+
+```cpp
+Async timers;
+
+Job led = timers.repeat(500, []() { digitalWrite(2, !digitalRead(2)); });   // каждые 500 мс
+timers.delay(3000, []() { Serial.println("прошло 3 с"); });                 // один раз
+timers.repeat(100, [](CallbackParams p) {                                    // сразу и каждые 100 мс
+  if (p.loopCount == 10) p.breakFn();                                         // 10 раз и стоп
+});
+
+void loop() { timers.tick(); }
+
+led.pause(); led.resume(); led.breakFn();   // управлять задачей снаружи
+```
+
+| Член | Описание |
+|---|---|
+| `delay(ms, fn)` | Один раз через `ms`. |
+| `repeat(ms, fn)` | Каждые `ms`, первый раз через `ms`. |
+| `repeat(ms, fn(CallbackParams))` | Каждые `ms`, первый раз на ближайшем `tick()`. В `CallbackParams`: `loopCount` (с 1), `iterationTime`, `breakFn()`. |
+| `queue(fn)` | Один раз на ближайшем `tick()`. |
+| `clearAll()` | Отменить всё. |
+| `size()` | Сколько задач активно. |
+| `Job::breakFn()` | Отменить задачу. |
+| `Job::pause()` / `resume()` | Приостановить / продолжить. |
+| `Job::untilFn(fn)` / `whileFn(fn)` | Остановить, когда `fn(params)` вернёт `true` / как только вернёт `false`. |
+| `Job::run()` | Выполнить колбэк сейчас (у задачи из `delay()` — выполнить и отменить). |
+
+Внутри колбэка можно отменять свои и чужие задачи, вызывать `clearAll()` и добавлять
+новые задачи (они выполнятся не раньше следующего `tick()`). `Job`, переживший свой
+`Async`, безопасен: его методы ничего не делают. `Async` не потокобезопасен — все вызовы
+из одной задачи; для `CoreLoop::async` — из задачи цикла или через `post()`. Объект
+нельзя копировать.
+
 ## Правила для нескольких ядер
 
 - Каждый Subject обрабатывает значения в одной задаче: в домашнем цикле, если он
@@ -220,5 +296,7 @@ moveGate.callWait(pdMS_TO_TICKS(50), 80, true);  // ждать место в о�
 | Первое `next(T())` (например, `next(false)` у `Subject<bool>`) отсекалось | Первое значение проходит всегда |
 | `BehaviorSubject(5)` затем `next(0)` отсекалось | Доставляется |
 | `complete()` из колбэка портил итерацию | Безопасно |
-| — | `CoreLoop`, `Delivery`, `on()`, `create(CoreLoop&)`, `observeOn()`, `subscribe(cb, loop)`, `get()`, `Action`, `SubFilters::filter()` |
+| — | `CoreLoop`, `Delivery`, `on()`, `create(CoreLoop&)`, `observeOn()`, `subscribe(cb, loop)`, `get()`, `Action`, `Remote`, `SubFilters::filter()` |
+| `Async`: `breakFn` из колбэка, `clearAll()` из колбэка и задачи с одинаковой задержкой портили память | Исправлено; добавлены `queue()`, `size()`, `Job::resume`; `Async` нельзя копировать |
+| `Job` по умолчанию: `run()` бросал исключение | Ничего не делает |
 | `create(Async*)` сразу заводил таймер | `create(CoreLoop&)` заводит таймер только в `fromPin()` |
